@@ -4,17 +4,31 @@ services:
     ports:
       - "6379:6379"
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mlops
+      POSTGRES_USER: mlops
+      POSTGRES_PASSWORD: mlops
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/tenant_model_registry.sql:/docker-entrypoint-initdb.d/001-registry.sql:ro
+
   inference:
     build:
       context: .
       dockerfile: inference/Dockerfile
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg2://mlops:mlops@postgres:5432/mlops
       DEVICE: cpu
     ports:
       - "8080:8080"
     depends_on:
       - redis
+      - postgres
 
   admin-api:
     build:
@@ -22,8 +36,14 @@ services:
       dockerfile: admin_api/Dockerfile
     environment:
       SECRET_KEY: local-dev-secret
+      DATABASE_URL: postgresql+psycopg2://mlops:mlops@postgres:5432/mlops
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
     ports:
       - "8003:8003"
+
+    depends_on:
+      - postgres
 
   worker:
     build:
@@ -31,7 +51,13 @@ services:
       dockerfile: worker/Dockerfile.worker
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
       TENANT_ID: client-a
       MODEL_ID: fraudnet-v1
     depends_on:
       - redis
+      - postgres
+
+volumes:
+  postgres-data:

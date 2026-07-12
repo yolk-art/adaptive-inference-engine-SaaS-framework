@@ -6,7 +6,7 @@ import os
 import logging
 from typing import Optional
 from fastapi import HTTPException, status
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 try:
     from jose import JWTError, jwt
@@ -24,9 +24,9 @@ TOKEN_EXPIRY_MINUTES = 60
 def create_access_token(tenant_id: str, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token for a tenant."""
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=TOKEN_EXPIRY_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRY_MINUTES)
     
     to_encode = {"tenant_id": tenant_id, "exp": expire}
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
