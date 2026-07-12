@@ -1,0 +1,1055 @@
+﻿From 7b24f51aa7cd459469e04d721336e24533c48379 Mon Sep 17 00:00:00 2001
+From: foxprint666 <114486138+foxprint666@users.noreply.github.com>
+Date: Sun, 12 Jul 2026 22:29:04 +0530
+Subject: [PATCH] Add runnable multi-tenant SaaS platform slice
+
+---
+ README.md                            |  24 +---
+ admin_api/Dockerfile                 |   9 ++
+ admin_api/__init__.py                |   1 +
+ admin_api/app.py                     | 169 +++++++++++++++++++++++++++
+ admin_api/models.py                  |   1 +
+ admin_api/requirements.txt           |   1 +
+ admin_api/retraining_orchestrator.py |  28 +++++
+ database/tenant_model_registry.sql   |  24 ++++
+ docker-compose.multitenant.yml       |  37 ++++++
+ docs/ARCHITECTURE.md                 |  10 ++
+ docs/DEPLOYMENT.md                   |  10 ++
+ docs/MULTI_TENANCY.md                |  10 ++
+ docs/TROUBLESHOOTING.md              |   7 ++
+ envoy-config/envoy_multitenant.yaml  |  50 ++++++++
+ inference/Dockerfile                 |   9 ++
+ inference/__init__.py                |   1 +
+ inference/app_multitenant.py         |  47 ++++++--
+ inference/churn_runtime.py           |  11 +-
+ inference/tenant_model_registry.py   |   4 +
+ inference/tenant_redis_client.py     |   8 +-
+ test_phase1_generality.py            |  51 ++++++++
+ test_phase2_multitenant.py           |  51 ++++++++
+ test_phase3_control_plane.py         |  44 +++++++
+ worker/Dockerfile.worker             |   8 ++
+ worker/__init__.py                   |   1 +
+ worker/metrics.py                    |  17 +++
+ worker/requirements.txt              |   1 +
+ worker/worker_multitenant.py         |  41 +++++++
+ 28 files changed, 644 insertions(+), 31 deletions(-)
+ create mode 100644 admin_api/Dockerfile
+ create mode 100644 admin_api/__init__.py
+ create mode 100644 admin_api/app.py
+ create mode 100644 admin_api/requirements.txt
+ create mode 100644 admin_api/retraining_orchestrator.py
+ create mode 100644 database/tenant_model_registry.sql
+ create mode 100644 docker-compose.multitenant.yml
+ create mode 100644 docs/ARCHITECTURE.md
+ create mode 100644 docs/DEPLOYMENT.md
+ create mode 100644 docs/MULTI_TENANCY.md
+ create mode 100644 docs/TROUBLESHOOTING.md
+ create mode 100644 envoy-config/envoy_multitenant.yaml
+ create mode 100644 inference/Dockerfile
+ create mode 100644 inference/__init__.py
+ create mode 100644 test_phase1_generality.py
+ create mode 100644 test_phase2_multitenant.py
+ create mode 100644 test_phase3_control_plane.py
+ create mode 100644 worker/Dockerfile.worker
+ create mode 100644 worker/__init__.py
+ create mode 100644 worker/metrics.py
+ create mode 100644 worker/requirements.txt
+ create mode 100644 worker/worker_multitenant.py
+
+diff --git a/README.md b/README.md
+index ea7fe31..08d082e 100644
+--- a/README.md
++++ b/README.md
+@@ -59,14 +59,14 @@ A production-ready, multi-tenant Machine Learning Operations (MLOps) platform th
+ - **Logical Isolation**: RabbitMQ virtual hosts per tenant, Redis namespace prefixes
+ - **Telemetry Isolation**: Client A data never leaks into Client B drift detection
+ 
+-### Phase 3: Production Hardening & Control Plane ✅
++### Phase 3: Production Hardening & Control Plane ⚙️ in progress
+ - **FastAPI Admin Control Plane**:
+   - `/register-tenant` — Self-service tenant registration
+   - `/models/register` — Upload models and configure drift thresholds
+   - `/models/{id}/retrain` — Manually initiate EWC retraining
+   - `/health`, `/status` — Observability endpoints
+ 
+-- **Async Retraining**: Ray Serve worker pool (avoids PyTorch CUDA fork conflicts)
++- **Async Retraining**: request boundary exists; Ray Serve/Celery execution backend is a next step
+ - **Rate Limiting**: Token bucket algorithm per tenant
+ - **Auth & Authorization**: Bearer token validation, X-Tenant-ID header enforcement
+ - **Prometheus Metrics**: Per-tenant drift detection, retraining latency, request throughput
+@@ -156,7 +156,7 @@ adaptive-inference-engine-SaaS-framework/
+ │   ├── app.py                         # FastAPI admin endpoints (Phase 3)
+ │   ├── models.py                      # Pydantic schemas (Phase 3)
+ │   ├── auth.py                        # Token validation (Phase 3)
+-│   ├── retraining_orchestrator.py     # Ray Serve integration (Phase 3)
++│   ├── retraining_orchestrator.py     # Retraining job boundary (Phase 3)
+ │   ├── rate_limiter.py                # Token bucket middleware (Phase 3)
+ │   ├── Dockerfile
+ │   └── requirements.txt
+@@ -167,20 +167,6 @@ adaptive-inference-engine-SaaS-framework/
+ ├── database/                           # Phase 2-3: Persistence
+ │   └── tenant_model_registry.sql      # PostgreSQL schema
+ │
+-├── kubernetes/                         # Phase 3: K8s Deployment
+-│   ├── base/                          # Kustomize base
+-│   │   ├── namespace.yaml
+-│   │   ├── inference-deployment.yaml
+-│   │   ├── worker-deployment.yaml
+-│   │   ├── admin-api-deployment.yaml
+-│   │   ├── envoy-configmap.yaml
+-│   │   └── kustomization.yaml
+-│   │
+-│   └── overlays/                      # Kustomize overlays
+-│       ├── dev/
+-│       ├── staging/
+-│       └── prod/
+-│
+ ├── test_phase1_generality.py          # Phase 1: Acid test
+ ├── test_phase2_multitenant.py         # Phase 2: Isolation test
+ ├── test_phase3_control_plane.py       # Phase 3: Integration test
+@@ -207,11 +193,11 @@ adaptive-inference-engine-SaaS-framework/
+ 
+ ### Production Hardening (Phase 3)
+ ✅ Self-service tenant registration
+-✅ Ray Serve async retraining (avoids CUDA fork issues)
++⚙️ Retraining request boundary; Ray Serve/Celery backend pending
+ ✅ Token bucket rate limiting per tenant
+ ✅ Bearer token authentication
+ ✅ Prometheus metrics and Grafana dashboards
+-✅ PostgreSQL for persistent model registry
++⚙️ PostgreSQL schema included; runtime registry is still in memory
+ 
+ ## Testing
+ 
+diff --git a/admin_api/Dockerfile b/admin_api/Dockerfile
+new file mode 100644
+index 0000000..937a1a8
+--- /dev/null
++++ b/admin_api/Dockerfile
+@@ -0,0 +1,9 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++COPY requirements.txt .
++RUN pip install --no-cache-dir -r requirements.txt
++COPY . .
++
++EXPOSE 8003
++CMD ["uvicorn", "admin_api.app:app", "--host", "0.0.0.0", "--port", "8003"]
+diff --git a/admin_api/__init__.py b/admin_api/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/admin_api/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/admin_api/app.py b/admin_api/app.py
+new file mode 100644
+index 0000000..01dae21
+--- /dev/null
++++ b/admin_api/app.py
+@@ -0,0 +1,169 @@
++"""
++FastAPI control plane for tenant and model administration.
++
++This is intentionally lightweight for local development: state is in memory,
++but the API shape mirrors the database-backed control plane the SaaS platform
++will use in production.
++"""
++
++import time
++import uuid
++from datetime import datetime
++from typing import Dict
++
++from fastapi import FastAPI, Header, HTTPException, Query, status
++
++from admin_api.auth import create_access_token, verify_bearer_token
++from admin_api.models import (
++    HealthResponse,
++    ModelRegistrationRequest,
++    ModelRegistrationResponse,
++    RetrainingRequest,
++    TenantRegistrationRequest,
++)
++from admin_api.rate_limiter import RateLimiter
++from inference.tenant_model_registry import ModelMetadata, TenantModelRegistry
++
++
++app = FastAPI(title="Adaptive Inference Admin API", version="0.1.0")
++started_at = time.time()
++rate_limiter = RateLimiter()
++tenants: Dict[str, TenantRegistrationRequest] = {}
++model_registry = TenantModelRegistry()
++retraining_jobs: Dict[str, Dict] = {}
++
++
++def require_tenant(authorization: str, x_tenant_id: str) -> str:
++    token_tenant_id = verify_bearer_token(authorization)
++    if token_tenant_id != x_tenant_id:
++        raise HTTPException(
++            status_code=status.HTTP_403_FORBIDDEN,
++            detail="Token tenant does not match X-Tenant-ID",
++        )
++    if not rate_limiter.is_allowed(x_tenant_id):
++        raise HTTPException(
++            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
++            detail="Tenant rate limit exceeded",
++        )
++    return token_tenant_id
++
++
++@app.get("/health", response_model=HealthResponse)
++def health():
++    active_models = sum(1 for _ in model_registry.registry.values())
++    return HealthResponse(
++        status="healthy",
++        version=app.version,
++        uptime_seconds=time.time() - started_at,
++        active_tenants=len(tenants),
++        active_models=active_models,
++    )
++
++
++@app.post("/auth/token")
++def issue_token(tenant_id: str = Query(...)):
++    return {"access_token": create_access_token(tenant_id), "token_type": "bearer"}
++
++
++@app.post("/register-tenant", status_code=status.HTTP_201_CREATED)
++def register_tenant(request: TenantRegistrationRequest):
++    tenants[request.tenant_id] = request
++    return {
++        "status": "success",
++        "tenant_id": request.tenant_id,
++        "message": f"Tenant {request.tenant_id} registered",
++    }
++
++
++@app.post("/models/register", response_model=ModelRegistrationResponse)
++def register_model(
++    request: ModelRegistrationRequest,
++    x_tenant_id: str = Header(...),
++    authorization: str = Header(...),
++):
++    require_tenant(authorization, x_tenant_id)
++    config_path = request.config_path or _default_config_for_framework(request.framework)
++    metadata = model_registry.register_model(
++        tenant_id=x_tenant_id,
++        model_id=request.model_id,
++        model_version=request.model_version,
++        storage_path=request.storage_path,
++        config_path=config_path,
++        schema_definition=request.schema_definition,
++        drift_thresholds=request.drift_thresholds,
++        framework=request.framework,
++    )
++    return ModelRegistrationResponse(
++        status="success",
++        model_id=metadata.model_id,
++        model_version=metadata.model_version,
++        tenant_id=metadata.tenant_id,
++        registration_id=str(uuid.uuid4()),
++        created_at=datetime.utcnow(),
++        message=f"Model {metadata.model_id}:{metadata.model_version} registered",
++    )
++
++
++@app.get("/models")
++def list_models(x_tenant_id: str = Header(...), authorization: str = Header(...)):
++    require_tenant(authorization, x_tenant_id)
++    return {
++        "tenant_id": x_tenant_id,
++        "models": [
++            _metadata_to_dict(metadata)
++            for metadata in model_registry.list_tenant_models(x_tenant_id).values()
++        ],
++    }
++
++
++@app.post("/models/{model_id}/retrain", status_code=status.HTTP_202_ACCEPTED)
++def request_retraining(
++    model_id: str,
++    request: RetrainingRequest,
++    x_tenant_id: str = Header(...),
++    authorization: str = Header(...),
++):
++    require_tenant(authorization, x_tenant_id)
++    if request.model_id != model_id:
++        raise HTTPException(
++            status_code=status.HTTP_400_BAD_REQUEST,
++            detail="Path model_id must match request model_id",
++        )
++    job_id = str(uuid.uuid4())
++    retraining_jobs[job_id] = {
++        "job_id": job_id,
++        "tenant_id": x_tenant_id,
++        "model_id": model_id,
++        "trigger_reason": request.trigger_reason,
++        "force_retrain": request.force_retrain,
++        "status": "queued",
++        "created_at": datetime.utcnow().isoformat(),
++    }
++    return retraining_jobs[job_id]
++
++
++@app.get("/status")
++def status_report():
++    return {
++        "tenants": len(tenants),
++        "models": len(model_registry.registry),
++        "retraining_jobs": len(retraining_jobs),
++    }
++
++
++def _metadata_to_dict(metadata: ModelMetadata) -> Dict:
++    return {
++        "tenant_id": metadata.tenant_id,
++        "model_id": metadata.model_id,
++        "model_version": metadata.model_version,
++        "storage_path": metadata.storage_path,
++        "config_path": metadata.config_path,
++        "framework": metadata.framework,
++        "drift_thresholds": metadata.drift_thresholds,
++    }
++
++
++def _default_config_for_framework(framework: str) -> str:
++    if framework == "sklearn":
++        return "inference/config_churn.json"
++    return "inference/config_fraudnet.json"
+diff --git a/admin_api/models.py b/admin_api/models.py
+index 471826b..4a1d768 100644
+--- a/admin_api/models.py
++++ b/admin_api/models.py
+@@ -12,6 +12,7 @@ class ModelRegistrationRequest(BaseModel):
+     model_id: str = Field(..., example="fraudnet-v1")
+     model_version: str = Field(..., example="1.0.0")
+     storage_path: str = Field(..., example="s3://bucket/models/fraudnet.pt")
++    config_path: Optional[str] = Field(default=None, example="inference/config_fraudnet.json")
+     schema_definition: Dict[str, Any]
+     drift_thresholds: Dict[str, float] = Field(default={"psi_threshold": 0.25, "auc_threshold": 0.72})
+     framework: str = Field(default="pytorch")
+diff --git a/admin_api/requirements.txt b/admin_api/requirements.txt
+new file mode 100644
+index 0000000..3c8d7e7
+--- /dev/null
++++ b/admin_api/requirements.txt
+@@ -0,0 +1 @@
++-r ../requirements.txt
+diff --git a/admin_api/retraining_orchestrator.py b/admin_api/retraining_orchestrator.py
+new file mode 100644
+index 0000000..2ca89ea
+--- /dev/null
++++ b/admin_api/retraining_orchestrator.py
+@@ -0,0 +1,28 @@
++"""
++Retraining orchestration boundary.
++
++This module deliberately keeps the first implementation synchronous and small.
++It gives the admin API a stable place to hand off retraining requests before a
++future Ray Serve or Celery backend is introduced.
++"""
++
++import uuid
++from datetime import datetime
++from typing import Dict
++
++
++def enqueue_retraining_job(
++    tenant_id: str,
++    model_id: str,
++    trigger_reason: str = "manual",
++    force_retrain: bool = False,
++) -> Dict:
++    return {
++        "job_id": str(uuid.uuid4()),
++        "tenant_id": tenant_id,
++        "model_id": model_id,
++        "trigger_reason": trigger_reason,
++        "force_retrain": force_retrain,
++        "status": "queued",
++        "created_at": datetime.utcnow().isoformat(),
++    }
+diff --git a/database/tenant_model_registry.sql b/database/tenant_model_registry.sql
+new file mode 100644
+index 0000000..c3b8612
+--- /dev/null
++++ b/database/tenant_model_registry.sql
+@@ -0,0 +1,24 @@
++CREATE TABLE IF NOT EXISTS tenants (
++    tenant_id TEXT PRIMARY KEY,
++    tenant_name TEXT NOT NULL,
++    contact_email TEXT NOT NULL,
++    tier TEXT NOT NULL DEFAULT 'standard',
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
++);
++
++CREATE TABLE IF NOT EXISTS tenant_models (
++    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
++    tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
++    model_id TEXT NOT NULL,
++    model_version TEXT NOT NULL,
++    framework TEXT NOT NULL,
++    storage_path TEXT NOT NULL,
++    config_path TEXT NOT NULL,
++    schema_definition JSONB NOT NULL,
++    drift_thresholds JSONB NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    UNIQUE (tenant_id, model_id, model_version)
++);
++
++CREATE INDEX IF NOT EXISTS idx_tenant_models_lookup
++    ON tenant_models (tenant_id, model_id, created_at DESC);
+diff --git a/docker-compose.multitenant.yml b/docker-compose.multitenant.yml
+new file mode 100644
+index 0000000..5fc0c9c
+--- /dev/null
++++ b/docker-compose.multitenant.yml
+@@ -0,0 +1,37 @@
++services:
++  redis:
++    image: redis:7-alpine
++    ports:
++      - "6379:6379"
++
++  inference:
++    build:
++      context: .
++      dockerfile: inference/Dockerfile
++    environment:
++      REDIS_URL: redis://redis:6379/0
++      DEVICE: cpu
++    ports:
++      - "8080:8080"
++    depends_on:
++      - redis
++
++  admin-api:
++    build:
++      context: .
++      dockerfile: admin_api/Dockerfile
++    environment:
++      SECRET_KEY: local-dev-secret
++    ports:
++      - "8003:8003"
++
++  worker:
++    build:
++      context: .
++      dockerfile: worker/Dockerfile.worker
++    environment:
++      REDIS_URL: redis://redis:6379/0
++      TENANT_ID: client-a
++      MODEL_ID: fraudnet-v1
++    depends_on:
++      - redis
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+new file mode 100644
+index 0000000..175fe98
+--- /dev/null
++++ b/docs/ARCHITECTURE.md
+@@ -0,0 +1,10 @@
++# Architecture
++
++The current platform is a runnable SaaS foundation with three local services:
++
++- `inference`: tenant-aware prediction endpoint with runtime selection.
++- `admin-api`: control plane for tenant/model registration and retraining requests.
++- `worker`: tenant-isolated telemetry summarization.
++
++The next production steps are persistent registry storage, real retraining
++orchestration, stronger auth, and dynamic Envoy cluster management.
+diff --git a/docs/DEPLOYMENT.md b/docs/DEPLOYMENT.md
+new file mode 100644
+index 0000000..ab7150c
+--- /dev/null
++++ b/docs/DEPLOYMENT.md
+@@ -0,0 +1,10 @@
++# Deployment
++
++Local development starts with:
++
++```bash
++docker compose -f docker-compose.multitenant.yml up --build
++```
++
++Production deployment still needs persistent registry wiring, secrets,
++TLS/mTLS, and Kubernetes manifests.
+diff --git a/docs/MULTI_TENANCY.md b/docs/MULTI_TENANCY.md
+new file mode 100644
+index 0000000..2e70d7a
+--- /dev/null
++++ b/docs/MULTI_TENANCY.md
+@@ -0,0 +1,10 @@
++# Multi-Tenancy
++
++Tenant isolation currently uses:
++
++- `X-Tenant-ID` request headers.
++- In-memory tenant/model registry records.
++- Redis hash-tag key prefixes such as `{client-a}:fraudnet-v1:telemetry_queue`.
++
++The next step is enforcing tenant ownership from a persistent control-plane
++database rather than process-local state.
+diff --git a/docs/TROUBLESHOOTING.md b/docs/TROUBLESHOOTING.md
+new file mode 100644
+index 0000000..3d94d85
+--- /dev/null
++++ b/docs/TROUBLESHOOTING.md
+@@ -0,0 +1,7 @@
++# Troubleshooting
++
++- If `python` is not found on Windows, use a virtual environment or an absolute
++  Python executable path.
++- If API tests skip, install dependencies from `requirements.txt`.
++- If inference cannot write telemetry, confirm Redis is running and `REDIS_URL`
++  points to the correct host.
+diff --git a/envoy-config/envoy_multitenant.yaml b/envoy-config/envoy_multitenant.yaml
+new file mode 100644
+index 0000000..0b491d6
+--- /dev/null
++++ b/envoy-config/envoy_multitenant.yaml
+@@ -0,0 +1,50 @@
++static_resources:
++  listeners:
++    - name: listener_http
++      address:
++        socket_address:
++          address: 0.0.0.0
++          port_value: 8088
++      filter_chains:
++        - filters:
++            - name: envoy.filters.network.http_connection_manager
++              typed_config:
++                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
++                stat_prefix: ingress_http
++                route_config:
++                  name: local_route
++                  virtual_hosts:
++                    - name: inference
++                      domains: ["*"]
++                      routes:
++                        - match:
++                            prefix: "/"
++                          route:
++                            cluster: inference_service
++                http_filters:
++                  - name: envoy.filters.http.lua
++                    typed_config:
++                      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
++                      inline_code: |
++                        function envoy_on_request(handle)
++                          local tenant = handle:headers():get("x-tenant-id")
++                          if tenant == nil or tenant == "" then
++                            handle:respond({[":status"] = "401"}, "missing x-tenant-id")
++                          end
++                        end
++                  - name: envoy.filters.http.router
++                    typed_config:
++                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
++  clusters:
++    - name: inference_service
++      connect_timeout: 1s
++      type: LOGICAL_DNS
++      load_assignment:
++        cluster_name: inference_service
++        endpoints:
++          - lb_endpoints:
++              - endpoint:
++                  address:
++                    socket_address:
++                      address: inference
++                      port_value: 8080
+diff --git a/inference/Dockerfile b/inference/Dockerfile
+new file mode 100644
+index 0000000..c69ac57
+--- /dev/null
++++ b/inference/Dockerfile
+@@ -0,0 +1,9 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++COPY requirements.txt .
++RUN pip install --no-cache-dir -r requirements.txt
++COPY . .
++
++EXPOSE 8080
++CMD ["uvicorn", "inference.app_multitenant:app", "--host", "0.0.0.0", "--port", "8080"]
+diff --git a/inference/__init__.py b/inference/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/inference/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/inference/app_multitenant.py b/inference/app_multitenant.py
+index 6df0cac..c02a38a 100644
+--- a/inference/app_multitenant.py
++++ b/inference/app_multitenant.py
+@@ -20,9 +20,14 @@ from typing import Dict, Any, Optional
+ from fastapi import FastAPI, HTTPException, status, Header
+ from fastapi.responses import JSONResponse
+ from pydantic import BaseModel
+-import redis
++
++try:
++    import redis
++except ImportError:  # pragma: no cover - only for minimal test environments
++    redis = None
+ 
+ from inference.fraudnet_runtime import FraudNetRuntime
++from inference.churn_runtime import ChurnRuntime
+ from inference.tenant_redis_client import TenantRedisClient
+ from inference.tenant_model_registry import TenantModelRegistry
+ 
+@@ -45,6 +50,8 @@ DEVICE = os.getenv("DEVICE", "cpu")
+ 
+ # Global Redis connection for admin operations
+ try:
++    if redis is None:
++        raise ImportError("redis package is not installed")
+     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+     logger.info("Connected to global Redis for admin operations")
+ except Exception as e:
+@@ -68,8 +75,12 @@ def get_tenant_redis_client(tenant_id: str) -> TenantRedisClient:
+ 
+ 
+ def initialize_tenant_model(
+-    tenant_id: str, model_id: str, config_path: str
+-) -> Optional[FraudNetRuntime]:
++    tenant_id: str,
++    model_id: str,
++    config_path: str,
++    framework: str = "pytorch",
++    model_path: Optional[str] = None,
++) -> Optional[Any]:
+     """
+     Initialize a ModelRuntime for a specific tenant.
+     
+@@ -89,10 +100,16 @@ def initialize_tenant_model(
+             logger.debug(f"Model {model_id} already initialized for {tenant_id}")
+             return model_runtimes[tenant_id][model_id]
+         
+-        # Create new runtime
+-        runtime = FraudNetRuntime(config_path, device=DEVICE)
+-        model_path = os.path.join(MODELS_DIR, f"model_{MODEL_ROLE}_{tenant_id}.pt")
+-        runtime.load(model_path)
++        if framework == "sklearn":
++            runtime = ChurnRuntime(config_path)
++            resolved_model_path = model_path or os.path.join(MODELS_DIR, f"{tenant_id}_{model_id}.pkl")
++        elif framework == "pytorch":
++            runtime = FraudNetRuntime(config_path, device=DEVICE)
++            resolved_model_path = model_path or os.path.join(MODELS_DIR, f"model_{MODEL_ROLE}_{tenant_id}.pt")
++        else:
++            raise ValueError(f"Unsupported model framework: {framework}")
++
++        runtime.load(resolved_model_path)
+         
+         model_runtimes[tenant_id][model_id] = runtime
+         logger.info(f"Initialized model {model_id} for tenant {tenant_id}")
+@@ -117,6 +134,7 @@ class TenantRegistrationRequest(BaseModel):
+     model_id: str
+     model_version: str
+     config_path: str  # Path to config.json
++    storage_path: Optional[str] = None  # Path to model binary; optional for demos
+     schema_definition: Dict[str, Any]
+     drift_thresholds: Dict[str, float]
+     framework: str = "pytorch"
+@@ -161,7 +179,8 @@ def register_tenant(
+             tenant_id=request.tenant_id,
+             model_id=request.model_id,
+             model_version=request.model_version,
+-            storage_path=request.config_path,
++            storage_path=request.storage_path or "",
++            config_path=request.config_path,
+             schema_definition=request.schema_definition,
+             drift_thresholds=request.drift_thresholds,
+             framework=request.framework,
+@@ -169,7 +188,11 @@ def register_tenant(
+         
+         # Initialize the model
+         runtime = initialize_tenant_model(
+-            request.tenant_id, request.model_id, request.config_path
++            request.tenant_id,
++            request.model_id,
++            request.config_path,
++            framework=request.framework,
++            model_path=request.storage_path,
+         )
+         
+         if not runtime:
+@@ -252,7 +275,11 @@ def predict(
+                 )
+             
+             runtime = initialize_tenant_model(
+-                x_tenant_id, x_model_id, metadata.storage_path
++                x_tenant_id,
++                x_model_id,
++                metadata.config_path,
++                framework=metadata.framework,
++                model_path=metadata.storage_path,
+             )
+             if not runtime:
+                 raise HTTPException(
+diff --git a/inference/churn_runtime.py b/inference/churn_runtime.py
+index 300adba..f835dc8 100644
+--- a/inference/churn_runtime.py
++++ b/inference/churn_runtime.py
+@@ -9,6 +9,7 @@ import os
+ import logging
+ import pickle
+ from typing import Dict, Any
++import numpy as np
+ from inference.model_runtime import ModelRuntime
+ 
+ try:
+@@ -47,12 +48,20 @@ class ChurnRuntime(ModelRuntime):
+             model_path: Path to .pkl or .joblib file
+         """
+         if not os.path.exists(model_path):
+-            logger.warning(f"Model path {model_path} does not exist. Using untrained model.")
++            logger.warning(f"Model path {model_path} does not exist. Using deterministic demo model.")
+             self.model_instance = RandomForestClassifier(
+                 n_estimators=10,
+                 max_depth=5,
+                 random_state=42
+             )
++            demo_x = np.array([
++                [22, 2, 25.0, 4, 0],
++                [58, 72, 120.0, 0, 2],
++                [35, 8, 45.0, 3, 0],
++                [46, 36, 85.0, 1, 1],
++            ])
++            demo_y = np.array([1, 0, 1, 0])
++            self.model_instance.fit(demo_x, demo_y)
+             return
+ 
+         try:
+diff --git a/inference/tenant_model_registry.py b/inference/tenant_model_registry.py
+index cd73bda..2107a35 100644
+--- a/inference/tenant_model_registry.py
++++ b/inference/tenant_model_registry.py
+@@ -25,6 +25,7 @@ class ModelMetadata:
+     model_id: str
+     model_version: str
+     storage_path: str  # e.g., /app/models/model_baseline.pt or s3://bucket/path
++    config_path: str  # e.g., inference/config_fraudnet.json
+     schema_definition: Dict  # Feature schema from config.json
+     drift_thresholds: Dict  # {"psi_threshold": 0.25, "auc_threshold": 0.72}
+     framework: str  # "pytorch", "sklearn", etc.
+@@ -59,6 +60,7 @@ class TenantModelRegistry:
+         schema_definition: Dict,
+         drift_thresholds: Dict,
+         framework: str = "pytorch",
++        config_path: Optional[str] = None,
+     ) -> ModelMetadata:
+         """
+         Register a model for a tenant.
+@@ -71,6 +73,7 @@ class TenantModelRegistry:
+             schema_definition: Feature schema dict
+             drift_thresholds: Drift detection thresholds dict
+             framework: ML framework ("pytorch", "sklearn", etc.)
++            config_path: Path to model config. Defaults to storage_path for legacy callers.
+             
+         Returns:
+             ModelMetadata object
+@@ -82,6 +85,7 @@ class TenantModelRegistry:
+             model_id=model_id,
+             model_version=model_version,
+             storage_path=storage_path,
++            config_path=config_path or storage_path,
+             schema_definition=schema_definition,
+             drift_thresholds=drift_thresholds,
+             framework=framework,
+diff --git a/inference/tenant_redis_client.py b/inference/tenant_redis_client.py
+index cdbcada..5171c33 100644
+--- a/inference/tenant_redis_client.py
++++ b/inference/tenant_redis_client.py
+@@ -12,7 +12,11 @@ all keys to the same cluster slot.
+ import json
+ import logging
+ from typing import Dict, Any, List, Optional
+-import redis
++
++try:
++    import redis
++except ImportError:  # pragma: no cover - exercised only in minimal environments
++    redis = None
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -35,6 +39,8 @@ class TenantRedisClient:
+             redis_url: Redis connection URL (e.g., redis://localhost:6379/0)
+             tenant_id: Unique identifier for the tenant (e.g., "client-a")
+         """
++        if redis is None:
++            raise ImportError("redis is required to create TenantRedisClient")
+         try:
+             self.client = redis.from_url(redis_url, decode_responses=True)
+             self.client.ping()
+diff --git a/test_phase1_generality.py b/test_phase1_generality.py
+new file mode 100644
+index 0000000..66ab0c0
+--- /dev/null
++++ b/test_phase1_generality.py
+@@ -0,0 +1,51 @@
++import importlib.util
++import unittest
++
++
++class Phase1GeneralityTests(unittest.TestCase):
++    def test_dynamic_schema_accepts_configured_features(self):
++        from inference.model_runtime import ModelRuntime
++
++        class DemoRuntime(ModelRuntime):
++            def load(self, model_path: str) -> None:
++                self.model = object()
++
++            def predict(self, features):
++                self.validate_features(features)
++                return {"prediction": 0, "probability": 0.1}
++
++        runtime = DemoRuntime("inference/config_fraudnet.json")
++        self.assertTrue(
++            runtime.validate_features(
++                {
++                    "amount": 1.0,
++                    "distance": 2.0,
++                    "velocity": 3.0,
++                    "age": 4.0,
++                    "risk_score": 0.5,
++                }
++            )
++        )
++
++    @unittest.skipUnless(importlib.util.find_spec("sklearn"), "scikit-learn not installed")
++    def test_churn_runtime_predicts_without_saved_model(self):
++        from inference.churn_runtime import ChurnRuntime
++
++        runtime = ChurnRuntime("inference/config_churn.json")
++        runtime.load("missing-demo-model.pkl")
++        result = runtime.predict(
++            {
++                "customer_age": 30,
++                "tenure_months": 6,
++                "monthly_spend": 49.0,
++                "support_tickets": 2,
++                "contract_type": 0,
++            }
++        )
++        self.assertIn(result["prediction"], [0, 1])
++        self.assertGreaterEqual(result["probability"], 0.0)
++        self.assertLessEqual(result["probability"], 1.0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_phase2_multitenant.py b/test_phase2_multitenant.py
+new file mode 100644
+index 0000000..9a28576
+--- /dev/null
++++ b/test_phase2_multitenant.py
+@@ -0,0 +1,51 @@
++import unittest
++
++
++class Phase2MultiTenantTests(unittest.TestCase):
++    def test_registry_isolates_models_by_tenant(self):
++        from inference.tenant_model_registry import TenantModelRegistry
++
++        registry = TenantModelRegistry()
++        registry.register_model(
++            tenant_id="client-a",
++            model_id="fraudnet-v1",
++            model_version="1.0.0",
++            storage_path="/models/a.pt",
++            config_path="inference/config_fraudnet.json",
++            schema_definition={"amount": {"type": "float"}},
++            drift_thresholds={"psi_threshold": 0.25},
++            framework="pytorch",
++        )
++        registry.register_model(
++            tenant_id="client-b",
++            model_id="fraudnet-v1",
++            model_version="1.0.0",
++            storage_path="/models/b.pt",
++            config_path="inference/config_fraudnet.json",
++            schema_definition={"amount": {"type": "float"}},
++            drift_thresholds={"psi_threshold": 0.25},
++            framework="pytorch",
++        )
++
++        self.assertEqual(
++            registry.get_latest_model("client-a", "fraudnet-v1").storage_path,
++            "/models/a.pt",
++        )
++        self.assertEqual(
++            registry.get_latest_model("client-b", "fraudnet-v1").storage_path,
++            "/models/b.pt",
++        )
++
++    def test_redis_keys_use_tenant_hash_tags(self):
++        from inference.tenant_redis_client import TenantRedisClient
++
++        client = TenantRedisClient.__new__(TenantRedisClient)
++        client.prefix = "{client-a}"
++        self.assertEqual(
++            client._format_key("fraudnet-v1:telemetry_queue"),
++            "{client-a}:fraudnet-v1:telemetry_queue",
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/test_phase3_control_plane.py b/test_phase3_control_plane.py
+new file mode 100644
+index 0000000..f4a45b9
+--- /dev/null
++++ b/test_phase3_control_plane.py
+@@ -0,0 +1,44 @@
++import importlib.util
++import unittest
++
++
++@unittest.skipUnless(importlib.util.find_spec("fastapi"), "FastAPI not installed")
++@unittest.skipUnless(importlib.util.find_spec("jose"), "python-jose not installed")
++class Phase3ControlPlaneTests(unittest.TestCase):
++    def test_admin_api_registers_tenant_and_model(self):
++        from fastapi.testclient import TestClient
++
++        from admin_api.app import app
++
++        client = TestClient(app)
++        tenant_response = client.post(
++            "/register-tenant",
++            json={
++                "tenant_id": "client-a",
++                "tenant_name": "Client A",
++                "contact_email": "ops@example.com",
++                "tier": "standard",
++            },
++        )
++        self.assertEqual(tenant_response.status_code, 201)
++
++        token = client.post("/auth/token?tenant_id=client-a").json()["access_token"]
++        model_response = client.post(
++            "/models/register",
++            headers={"X-Tenant-ID": "client-a", "Authorization": f"Bearer {token}"},
++            json={
++                "model_id": "fraudnet-v1",
++                "model_version": "1.0.0",
++                "storage_path": "/models/model_baseline_client-a.pt",
++                "config_path": "inference/config_fraudnet.json",
++                "schema_definition": {"amount": {"type": "float"}},
++                "drift_thresholds": {"psi_threshold": 0.25, "auc_threshold": 0.72},
++                "framework": "pytorch",
++            },
++        )
++        self.assertEqual(model_response.status_code, 200)
++        self.assertEqual(model_response.json()["tenant_id"], "client-a")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/worker/Dockerfile.worker b/worker/Dockerfile.worker
+new file mode 100644
+index 0000000..a0dde30
+--- /dev/null
++++ b/worker/Dockerfile.worker
+@@ -0,0 +1,8 @@
++FROM python:3.11-slim
++
++WORKDIR /app
++COPY requirements.txt .
++RUN pip install --no-cache-dir -r requirements.txt
++COPY . .
++
++CMD ["python", "-m", "worker.worker_multitenant"]
+diff --git a/worker/__init__.py b/worker/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/worker/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/worker/metrics.py b/worker/metrics.py
+new file mode 100644
+index 0000000..b4ca798
+--- /dev/null
++++ b/worker/metrics.py
+@@ -0,0 +1,17 @@
++"""
++Small metric helpers for the multi-tenant worker.
++"""
++
++from typing import Iterable
++
++
++def population_stability_index(expected: Iterable[float], actual: Iterable[float]) -> float:
++    expected_values = list(expected)
++    actual_values = list(actual)
++    if not expected_values or not actual_values:
++        return 0.0
++
++    expected_mean = sum(expected_values) / len(expected_values)
++    actual_mean = sum(actual_values) / len(actual_values)
++    denominator = abs(expected_mean) + 1e-9
++    return abs(actual_mean - expected_mean) / denominator
+diff --git a/worker/requirements.txt b/worker/requirements.txt
+new file mode 100644
+index 0000000..3c8d7e7
+--- /dev/null
++++ b/worker/requirements.txt
+@@ -0,0 +1 @@
++-r ../requirements.txt
+diff --git a/worker/worker_multitenant.py b/worker/worker_multitenant.py
+new file mode 100644
+index 0000000..d89d4e9
+--- /dev/null
++++ b/worker/worker_multitenant.py
+@@ -0,0 +1,41 @@
++"""
++Background worker skeleton for tenant-isolated drift checks.
++
++The production version will schedule retraining jobs. This local slice reads
++tenant telemetry through TenantRedisClient and calculates a simple PSI-like
++signal so the data path can be verified end to end.
++"""
++
++import os
++from typing import Dict, List
++
++from inference.tenant_redis_client import TenantRedisClient
++from worker.metrics import population_stability_index
++
++
++REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
++
++
++def summarize_tenant_model(tenant_id: str, model_id: str) -> Dict:
++    redis_client = TenantRedisClient(REDIS_URL, tenant_id)
++    records = redis_client.get_telemetry_batch(model_id)
++    probabilities: List[float] = [
++        float(record.get("probability", 0.0))
++        for record in records
++        if isinstance(record, dict)
++    ]
++    baseline = [0.5 for _ in probabilities]
++    psi = population_stability_index(baseline, probabilities)
++    redis_client.set_metrics(model_id, "psi_probability", psi)
++    return {
++        "tenant_id": tenant_id,
++        "model_id": model_id,
++        "records": len(records),
++        "psi_probability": psi,
++    }
++
++
++if __name__ == "__main__":
++    tenant = os.getenv("TENANT_ID", "client-a")
++    model = os.getenv("MODEL_ID", "fraudnet-v1")
++    print(summarize_tenant_model(tenant, model))
+-- 
+2.54.0.windows.1
+

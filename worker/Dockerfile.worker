@@ -5,4 +5,4 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
-CMD ["python", "-m", "worker.worker_multitenant"]
+CMD ["celery", "-A", "worker.retraining_tasks.celery_app", "worker", "--loglevel=INFO"]

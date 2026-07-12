@@ -59,14 +59,13 @@ A production-ready, multi-tenant Machine Learning Operations (MLOps) platform th
 - **Logical Isolation**: RabbitMQ virtual hosts per tenant, Redis namespace prefixes
 - **Telemetry Isolation**: Client A data never leaks into Client B drift detection
 
-### Phase 3: Production Hardening & Control Plane ⚙️ in progress
+### Phase 3: Production Hardening & Control Plane ✅
 - **FastAPI Admin Control Plane**:
   - `/register-tenant` — Self-service tenant registration
   - `/models/register` — Upload models and configure drift thresholds
   - `/models/{id}/retrain` — Manually initiate EWC retraining
   - `/health`, `/status` — Observability endpoints
-
-- **Async Retraining**: request boundary exists; Ray Serve/Celery execution backend is a next step
+- **Async Retraining**: Celery task with full EWC training loop (Fisher diagonal + regularisation loss) and sklearn refit branch
 - **Rate Limiting**: Token bucket algorithm per tenant
 - **Auth & Authorization**: Bearer token validation, X-Tenant-ID header enforcement
 - **Prometheus Metrics**: Per-tenant drift detection, retraining latency, request throughput
@@ -147,8 +146,9 @@ adaptive-inference-engine-SaaS-framework/
 │   └── Dockerfile
 │
 ├── worker/                             # Phase 2-3: Background Workers
-│   ├── worker_multitenant.py          # Multi-tenant drift detection (Phase 2)
-│   ├── metrics.py                     # Prometheus instrumentation
+│   ├── worker_multitenant.py          # Multi-tenant drift detection (Phase 2-3)
+│   ├── retraining_tasks.py            # Celery EWC retraining tasks (Phase 3)
+│   ├── metrics.py                     # PSI, Adversarial AUC, Prometheus (Phase 3)
 │   ├── Dockerfile.worker
 │   └── requirements.txt
 │
@@ -169,7 +169,7 @@ adaptive-inference-engine-SaaS-framework/
 │
 ├── test_phase1_generality.py          # Phase 1: Acid test
 ├── test_phase2_multitenant.py         # Phase 2: Isolation test
-├── test_phase3_control_plane.py       # Phase 3: Integration test
+├── test_phase3_control_plane.py       # Phase 3: Integration test (12 cases)
 │
 └── docs/
     ├── ARCHITECTURE.md
@@ -193,11 +193,11 @@ adaptive-inference-engine-SaaS-framework/
 
 ### Production Hardening (Phase 3)
 ✅ Self-service tenant registration
-⚙️ Retraining request boundary; Ray Serve/Celery backend pending
+✅ Async EWC retraining via Celery (solo pool safe; Ray Serve-compatible)
 ✅ Token bucket rate limiting per tenant
 ✅ Bearer token authentication
-✅ Prometheus metrics and Grafana dashboards
-⚙️ PostgreSQL schema included; runtime registry is still in memory
+✅ Prometheus metrics: PSI, adversarial AUC, drift events, retraining triggers
+✅ PostgreSQL backend (set `DATABASE_URL`); in-memory fallback for dev/test
 
 ## Testing
 
@@ -210,7 +210,7 @@ python test_phase1_generality.py
 python test_phase2_multitenant.py
 # Output: ✓✓✓ ALL PHASE 2 TESTS PASSED ✓✓✓
 
-# Run Phase 3 test
+# Run Phase 3 test (12 test cases)
 python test_phase3_control_plane.py
 # Output: ✓✓✓ ALL PHASE 3 TESTS PASSED ✓✓✓
 ```
@@ -222,20 +222,25 @@ python test_phase3_control_plane.py
 docker-compose -f docker-compose.multitenant.yml up
 ```
 
-### Kubernetes (Helm)
+### Kubernetes (Kustomize)
 ```bash
-helm install mlops-saas ./kubernetes/helm -f kubernetes/helm/values.yaml
+kubectl apply -k kubernetes/overlays/dev
+kubectl apply -k kubernetes/overlays/prod
 ```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full deployment guide including
+environment variables, secrets management, TLS/mTLS, and CI/CD pipeline blueprint.
 
 ## Production Checklist
 
-- [ ] Replace in-memory TenantModelRegistry with PostgreSQL
-- [ ] Set up Redis Sentinel for HA
+- [ ] Set `SECRET_KEY` to a strong random value via secrets manager
+- [ ] Set `DATABASE_URL` to activate PostgreSQL registry backend
+- [ ] Set up Redis Sentinel or Redis Cluster for HA
 - [ ] Configure TLS/mTLS for inter-service communication
 - [ ] Set up Vault for secrets management
-- [ ] Configure RBAC and network policies
+- [ ] Configure RBAC and Kubernetes NetworkPolicy (default-deny)
 - [ ] Set up log aggregation (ELK, Loki, etc.)
-- [ ] Configure alert thresholds and notifications
+- [ ] Configure Prometheus + Grafana alert thresholds
 - [ ] Load test with 2+ concurrent tenants
 - [ ] Set up CI/CD pipeline for model deployment
 - [ ] Document SLAs and runbooks

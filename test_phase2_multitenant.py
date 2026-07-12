@@ -6,6 +6,8 @@ class Phase2MultiTenantTests(unittest.TestCase):
         from inference.tenant_model_registry import TenantModelRegistry
 
         registry = TenantModelRegistry()
+        registry.register_tenant("client-a", "Client A", "a@example.com")
+        registry.register_tenant("client-b", "Client B", "b@example.com")
         registry.register_model(
             tenant_id="client-a",
             model_id="fraudnet-v1",
@@ -35,6 +37,8 @@ class Phase2MultiTenantTests(unittest.TestCase):
             registry.get_latest_model("client-b", "fraudnet-v1").storage_path,
             "/models/b.pt",
         )
+        self.assertEqual(registry.count_tenants(), 2)
+        self.assertEqual(registry.count_models(), 2)
 
     def test_redis_keys_use_tenant_hash_tags(self):
         from inference.tenant_redis_client import TenantRedisClient

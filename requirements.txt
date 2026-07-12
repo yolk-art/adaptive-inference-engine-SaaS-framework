@@ -11,6 +11,7 @@ pyyaml==6.0.1
 python-dotenv==1.0.0
 ray==2.10.0
 ray[serve]==2.10.0
+celery==5.3.6
 python-jose==3.3.0
 cryptography==41.0.7
 python-multipart==0.0.6
